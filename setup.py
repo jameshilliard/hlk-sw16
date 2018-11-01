@@ -9,6 +9,7 @@ setup(
         url='https://github.com/jameshilliard/hlk-sw16',
         author='James Hilliard',
         author_email='james.hilliard1@gmail.com',
+        license='MIT',
         packages=[
             'hlk_sw16',
             ],
