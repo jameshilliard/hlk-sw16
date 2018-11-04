@@ -108,7 +108,8 @@ class SW16Protocol(asyncio.Protocol):
                 if self._waiters:
                     self._send_packet()
         else:
-            pass
+            self.logger.warning('received unknown packet: %s',
+                                binascii.hexlify(raw_packet))
 
     def _send_packet(self):
         """Write next packet in send queue."""
