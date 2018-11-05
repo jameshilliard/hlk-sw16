@@ -2,6 +2,7 @@
 import asyncio
 from collections import deque
 import logging
+import codecs
 import binascii
 
 
@@ -10,8 +11,7 @@ class SW16Protocol(asyncio.Protocol):
 
     transport = None  # type: asyncio.Transport
 
-    def __init__(self, disconnect_callback=None, event_callback=None,
-                 loop=None, logger=None):
+    def __init__(self, disconnect_callback=None, loop=None, logger=None):
         """Initialize the HLK-SW16 protocol."""
         if loop:
             self.loop = loop
@@ -23,7 +23,6 @@ class SW16Protocol(asyncio.Protocol):
             self.logger = logging.getLogger(__name__)
         self._buffer = b''
         self.disconnect_callback = disconnect_callback
-        self.event_callback = event_callback
         self._waiters = deque()
         self._status_waiters = deque()
         self._in_transaction = False
@@ -37,10 +36,6 @@ class SW16Protocol(asyncio.Protocol):
 
     def data_received(self, data):
         """Add incoming data to buffer."""
-        self.logger.debug('received data: %s', binascii.hexlify(data))
-        self.logger.debug(data)
-        self.logger.debug('received buffer: %s',
-                          binascii.hexlify(self._buffer))
         self._buffer += data
         self._handle_lines()
 
@@ -50,10 +45,7 @@ class SW16Protocol(asyncio.Protocol):
             linebuf, self._buffer = self._buffer.rsplit(b'\xdd', 1)
             line = linebuf[-19:]
             self._buffer += linebuf[:-19]
-            self.logger.debug('received line: %s', binascii.hexlify(line))
             if self._valid_packet(line):
-                self.logger.debug('received valid line: %s',
-                                  binascii.hexlify(line))
                 self._handle_raw_packet(line)
             else:
                 self.logger.warning('dropping invalid data: %s',
@@ -97,8 +89,6 @@ class SW16Protocol(asyncio.Protocol):
                     states[format(switch, 'x')] = False
                     self.states[format(switch, 'x')] = False
             self.logger.debug(states)
-            if self.event_callback:
-                self.event_callback(states)
             if self._in_transaction:
                 self._in_transaction = False
                 self._active_transaction.set_result(states)
@@ -120,6 +110,7 @@ class SW16Protocol(asyncio.Protocol):
 
     def send(self, packet):
         """Add packet to send queue."""
+        self.logger.debug(binascii.hexlify(packet))
         fut = self.loop.create_future()
         self._waiters.append((fut, packet))
         if self._waiters and self._in_transaction is False:
@@ -137,34 +128,48 @@ class SW16Protocol(asyncio.Protocol):
     async def turn_on(self, switch=None):
         """Turn on relay."""
         if switch is not None:
+            switch = codecs.decode(switch.rjust(2, '0'), 'hex')
             packet = self._format_packet(b"\x10" + switch + b"\x02")
         else:
             packet = self._format_packet(b"\x0b")
-        self.logger.debug(packet)
         states = await self.send(packet)
         return states
 
     async def turn_off(self, switch=None):
         """Turn off relay."""
         if switch is not None:
+            switch = codecs.decode(switch.rjust(2, '0'), 'hex')
             packet = self._format_packet(b"\x10" + switch + b"\x01")
         else:
             packet = self._format_packet(b"\x0a")
-        self.logger.debug(packet)
         states = await self.send(packet)
         return states
 
-    async def status(self):
+    async def status(self, switch=None):
         """Get current relay status."""
-        if self._waiters or self._in_transaction:
-            fut = self.loop.create_future()
-            self._status_waiters.append(fut)
-            states = await fut
+        if switch is not None:
+            if self.states.get(switch, None) is not None:
+                state = self.states[switch]
+            elif self._waiters or self._in_transaction:
+                fut = self.loop.create_future()
+                self._status_waiters.append(fut)
+                states = await fut
+                state = states[switch]
+            else:
+                packet = self._format_packet(b"\x1e")
+                states = await self.send(packet)
+                state = states[switch]
         else:
-            packet = self._format_packet(b"\x1e")
-            self.logger.debug(packet)
-            states = await self.send(packet)
-        return states
+            if self.states:
+                state = self.states
+            elif self._waiters or self._in_transaction:
+                fut = self.loop.create_future()
+                self._status_waiters.append(fut)
+                state = await fut
+            else:
+                packet = self._format_packet(b"\x1e")
+                state = await self.send(packet)
+        return state
 
     def connection_lost(self, exc):
         """Log when connection is closed, if needed call callback."""
@@ -176,14 +181,13 @@ class SW16Protocol(asyncio.Protocol):
             self.disconnect_callback(exc)
 
 
-async def create_hlk_sw16_connection(port=None, host=None, event_callback=None,
+async def create_hlk_sw16_connection(port=None, host=None,
                                      disconnect_callback=None, loop=None,
                                      logger=None):
     """Create HLK-SW16 manager class, returns transport coroutine."""
     # use default protocol if not specified
     conn = await loop.create_connection(
         lambda: SW16Protocol(disconnect_callback=disconnect_callback,
-                             event_callback=event_callback,
                              loop=loop, logger=logger),
         host=host,
         port=port)
