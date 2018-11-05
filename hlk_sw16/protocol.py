@@ -119,7 +119,7 @@ class SW16Protocol(asyncio.Protocol):
 
     def send(self, packet):
         """Add packet to send queue."""
-        self.logger.debug(binascii.hexlify(packet))
+        self.logger.debug('sending packet: %s', binascii.hexlify(packet))
         fut = self.loop.create_future()
         self._waiters.append((fut, packet))
         if self._waiters and self._in_transaction is False:
