@@ -27,6 +27,7 @@ class SW16Protocol(asyncio.Protocol):
         self._status_waiters = deque()
         self._in_transaction = False
         self._active_transaction = None
+        self._status_callbacks = {}
         self.states = {}
 
     def connection_made(self, transport):
@@ -81,13 +82,21 @@ class SW16Protocol(asyncio.Protocol):
                 year, month, day, hour, minute, sec, week)
         elif raw_packet[1:2] == b'\x0c':
             states = {}
+            changes = []
             for switch in range(0, 16):
                 if raw_packet[2+switch:3+switch] == b'\x02':
                     states[format(switch, 'x')] = True
-                    self.states[format(switch, 'x')] = True
+                    if self.states.get(format(switch, 'x'), None) is not True:
+                        changes.append(format(switch, 'x'))
+                        self.states[format(switch, 'x')] = True
                 elif raw_packet[2+switch:3+switch] == b'\x01':
                     states[format(switch, 'x')] = False
-                    self.states[format(switch, 'x')] = False
+                    if self.states.get(format(switch, 'x'), None) is not False:
+                        changes.append(format(switch, 'x'))
+                        self.states[format(switch, 'x')] = False
+            for switch in changes:
+                for status_cb in self._status_callbacks.get(switch, []):
+                    status_cb(states[switch])
             self.logger.debug(states)
             if self._in_transaction:
                 self._in_transaction = False
@@ -171,14 +180,20 @@ class SW16Protocol(asyncio.Protocol):
                 state = await self.send(packet)
         return state
 
+    def register_status_callback(self, callback, switch):
+        """Register a callback which will fire when state changes."""
+        if self._status_callbacks.get(switch, None) is None:
+            self._status_callbacks[switch] = []
+        self._status_callbacks[switch].append(callback)
+
     def connection_lost(self, exc):
         """Log when connection is closed, if needed call callback."""
         if exc:
-            self.logger.exception('disconnected due to exception')
+            self.logger.error('disconnected due to error')
         else:
             self.logger.info('disconnected because of close/abort.')
         if self.disconnect_callback:
-            self.disconnect_callback(exc)
+            self.disconnect_callback()
 
 
 async def create_hlk_sw16_connection(port=None, host=None,
