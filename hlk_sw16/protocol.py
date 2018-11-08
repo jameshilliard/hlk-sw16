@@ -11,29 +11,18 @@ class SW16Protocol(asyncio.Protocol):
 
     transport = None  # type: asyncio.Transport
 
-    def __init__(self, disconnect_callback=None, loop=None, logger=None):
+    def __init__(self, client, disconnect_callback=None, loop=None,
+                 logger=None):
         """Initialize the HLK-SW16 protocol."""
-        if loop:
-            self.loop = loop
-        else:
-            self.loop = asyncio.get_event_loop()
-        if logger:
-            self.logger = logger
-        else:
-            self.logger = logging.getLogger(__name__)
+        self.client = client
+        self.loop = loop
+        self.logger = logger
         self._buffer = b''
         self.disconnect_callback = disconnect_callback
-        self._waiters = deque()
-        self._status_waiters = deque()
-        self._in_transaction = False
-        self._active_transaction = None
-        self._status_callbacks = {}
-        self.states = {}
 
     def connection_made(self, transport):
         """Initialize protocol transport."""
         self.transport = transport
-        self.logger.debug('connected')
 
     def data_received(self, data):
         """Add incoming data to buffer."""
@@ -86,105 +75,48 @@ class SW16Protocol(asyncio.Protocol):
             for switch in range(0, 16):
                 if raw_packet[2+switch:3+switch] == b'\x02':
                     states[format(switch, 'x')] = True
-                    if self.states.get(format(switch, 'x'), None) is not True:
+                    if (self.client.states.get(format(switch, 'x'), None)
+                            is not True):
                         changes.append(format(switch, 'x'))
-                        self.states[format(switch, 'x')] = True
+                        self.client.states[format(switch, 'x')] = True
                 elif raw_packet[2+switch:3+switch] == b'\x01':
                     states[format(switch, 'x')] = False
-                    if self.states.get(format(switch, 'x'), None) is not False:
+                    if (self.client.states.get(format(switch, 'x'), None)
+                            is not False):
                         changes.append(format(switch, 'x'))
-                        self.states[format(switch, 'x')] = False
+                        self.client.states[format(switch, 'x')] = False
             for switch in changes:
-                for status_cb in self._status_callbacks.get(switch, []):
+                for status_cb in self.client.status_callbacks.get(switch, []):
                     status_cb(states[switch])
             self.logger.debug(states)
-            if self._in_transaction:
-                self._in_transaction = False
-                self._active_transaction.set_result(states)
-                while self._status_waiters:
-                    waiter = self._status_waiters.popleft()
+            if self.client.in_transaction:
+                self.client.in_transaction = False
+                self.client.active_packet = False
+                self.client.active_transaction.set_result(states)
+                while self.client.status_waiters:
+                    waiter = self.client.status_waiters.popleft()
                     waiter.set_result(states)
-                if self._waiters:
-                    self._send_packet()
+                if self.client.waiters:
+                    self.send_packet()
         else:
             self.logger.warning('received unknown packet: %s',
                                 binascii.hexlify(raw_packet))
 
-    def _send_packet(self):
+    def send_packet(self):
         """Write next packet in send queue."""
-        waiter, packet = self._waiters.popleft()
-        self._active_transaction = waiter
-        self._in_transaction = True
+        waiter, packet = self.client.waiters.popleft()
+        self.client.active_transaction = waiter
+        self.client.in_transaction = True
+        self.client.active_packet = packet
         self.transport.write(packet)
 
-    def send(self, packet):
-        """Add packet to send queue."""
-        self.logger.debug('sending packet: %s', binascii.hexlify(packet))
-        fut = self.loop.create_future()
-        self._waiters.append((fut, packet))
-        if self._waiters and self._in_transaction is False:
-            self._send_packet()
-        return fut
-
     @staticmethod
-    def _format_packet(command):
+    def format_packet(command):
         """Format packet to be sent."""
         frame_header = b"\xaa"
         verify = b"\x0b"
         send_delim = b"\xbb"
         return frame_header + command.ljust(17, b"\x00") + verify + send_delim
-
-    async def turn_on(self, switch=None):
-        """Turn on relay."""
-        if switch is not None:
-            switch = codecs.decode(switch.rjust(2, '0'), 'hex')
-            packet = self._format_packet(b"\x10" + switch + b"\x02")
-        else:
-            packet = self._format_packet(b"\x0b")
-        states = await self.send(packet)
-        return states
-
-    async def turn_off(self, switch=None):
-        """Turn off relay."""
-        if switch is not None:
-            switch = codecs.decode(switch.rjust(2, '0'), 'hex')
-            packet = self._format_packet(b"\x10" + switch + b"\x01")
-        else:
-            packet = self._format_packet(b"\x0a")
-        states = await self.send(packet)
-        return states
-
-    async def status(self, switch=None):
-        """Get current relay status."""
-        if switch is not None:
-            if self.states.get(switch, None) is not None:
-                state = self.states[switch]
-            elif self._waiters or self._in_transaction:
-                fut = self.loop.create_future()
-                self._status_waiters.append(fut)
-                states = await fut
-                state = states[switch]
-            else:
-                packet = self._format_packet(b"\x1e")
-                states = await self.send(packet)
-                state = states[switch]
-        else:
-            if self.states:
-                state = self.states
-            elif self._waiters or self._in_transaction:
-                fut = self.loop.create_future()
-                self._status_waiters.append(fut)
-                state = await fut
-            else:
-                packet = self._format_packet(b"\x1e")
-                state = await self.send(packet)
-        return state
-
-    def register_status_callback(self, callback, switch):
-        """Register a callback which will fire when state changes."""
-        if self._status_callbacks.get(switch, None) is None:
-            self._status_callbacks[switch] = []
-        self._status_callbacks[switch].append(callback)
 
     def connection_lost(self, exc):
         """Log when connection is closed, if needed call callback."""
@@ -196,15 +128,151 @@ class SW16Protocol(asyncio.Protocol):
             self.disconnect_callback()
 
 
-async def create_hlk_sw16_connection(port=None, host=None,
-                                     disconnect_callback=None, loop=None,
-                                     logger=None):
-    """Create HLK-SW16 manager class, returns transport coroutine."""
-    # use default protocol if not specified
-    conn = await loop.create_connection(
-        lambda: SW16Protocol(disconnect_callback=disconnect_callback,
-                             loop=loop, logger=logger),
-        host=host,
-        port=port)
+class SW16Client:
+    """HLK-SW16 client wrapper class."""
 
-    return conn
+    def __init__(self, host, port=8080,
+                 disconnect_callback=None, reconnect_callback=None,
+                 loop=None, logger=None, timeout=10, reconnect_interval=10):
+        """Initialize the HLK-SW16 client wrapper."""
+        if loop:
+            self.loop = loop
+        else:
+            self.loop = asyncio.get_event_loop()
+        if logger:
+            self.logger = logger
+        else:
+            self.logger = logging.getLogger(__name__)
+        self.host = host
+        self.port = port
+        self.transport = None
+        self.protocol = None
+        self.is_connected = False
+        self.reconnect = True
+        self.timeout = timeout
+        self.reconnect_interval = reconnect_interval
+        self.disconnect_callback = disconnect_callback
+        self.reconnect_callback = reconnect_callback
+        self.waiters = deque()
+        self.status_waiters = deque()
+        self.in_transaction = False
+        self.active_transaction = None
+        self.active_packet = None
+        self.status_callbacks = {}
+        self.states = {}
+
+    async def setup(self):
+        """Set up the connection with automatic retry."""
+        while True:
+            fut = self.loop.create_connection(
+                lambda: SW16Protocol(
+                    self,
+                    disconnect_callback=self.handle_disconnect_callback,
+                    loop=self.loop, logger=self.logger),
+                host=self.host,
+                port=self.port)
+            try:
+                self.transport, self.protocol = \
+                    await asyncio.wait_for(fut, timeout=self.timeout)
+            except asyncio.TimeoutError:
+                self.logger.warning("Could not connect due to timeout error.")
+            except OSError as exc:
+                self.logger.warning("Could not connect due to error: %s",
+                                    str(exc))
+            else:
+                self.is_connected = True
+                if self.reconnect_callback:
+                    self.reconnect_callback()
+                break
+            await asyncio.sleep(self.reconnect_interval)
+
+    def stop(self):
+        """Shut down transport."""
+        self.reconnect = False
+        self.logger.debug("Shutting down.")
+        if self.transport:
+            self.transport.close()
+
+    def handle_disconnect_callback(self):
+        """Reconnect automatically unless stopping."""
+        if self.reconnect:
+            self.logger.debug("Protocol disconnected...reconnecting")
+            asyncio.ensure_future(self.setup(), loop=self.loop)
+        if self.disconnect_callback:
+            self.disconnect_callback()
+
+    def register_status_callback(self, callback, switch):
+        """Register a callback which will fire when state changes."""
+        if self.status_callbacks.get(switch, None) is None:
+            self.status_callbacks[switch] = []
+        self.status_callbacks[switch].append(callback)
+
+    def _send(self, packet):
+        """Add packet to send queue."""
+        self.logger.debug('sending packet: %s', binascii.hexlify(packet))
+        fut = self.loop.create_future()
+        self.waiters.append((fut, packet))
+        if self.waiters and self.in_transaction is False:
+            self.protocol.send_packet()
+        return fut
+
+    async def turn_on(self, switch=None):
+        """Turn on relay."""
+        if switch is not None:
+            switch = codecs.decode(switch.rjust(2, '0'), 'hex')
+            packet = self.protocol.format_packet(b"\x10" + switch + b"\x02")
+        else:
+            packet = self.protocol.format_packet(b"\x0b")
+        states = await self._send(packet)
+        return states
+
+    async def turn_off(self, switch=None):
+        """Turn off relay."""
+        if switch is not None:
+            switch = codecs.decode(switch.rjust(2, '0'), 'hex')
+            packet = self.protocol.format_packet(b"\x10" + switch + b"\x01")
+        else:
+            packet = self.protocol.format_packet(b"\x0a")
+        states = await self._send(packet)
+        return states
+
+    async def status(self, switch=None):
+        """Get current relay status."""
+        if switch is not None:
+            if self.states.get(switch, None) is not None:
+                state = self.states[switch]
+            elif self.waiters or self.in_transaction:
+                fut = self.loop.create_future()
+                self.status_waiters.append(fut)
+                states = await fut
+                state = states[switch]
+            else:
+                packet = self.protocol.format_packet(b"\x1e")
+                states = await self._send(packet)
+                state = states[switch]
+        else:
+            if self.states:
+                state = self.states
+            elif self.waiters or self.in_transaction:
+                fut = self.loop.create_future()
+                self.status_waiters.append(fut)
+                state = await fut
+            else:
+                packet = self.protocol.format_packet(b"\x1e")
+                state = await self._send(packet)
+        return state
+
+
+async def create_hlk_sw16_connection(port=None, host=None,
+                                     disconnect_callback=None,
+                                     reconnect_callback=None, loop=None,
+                                     logger=None, timeout=None,
+                                     reconnect_interval=None):
+    """Create HLK-SW16 Client class."""
+    client = SW16Client(host, port=port,
+                        disconnect_callback=disconnect_callback,
+                        reconnect_callback=None, loop=loop, logger=logger,
+                        timeout=timeout, reconnect_interval=reconnect_interval)
+    await client.setup()
+
+    return client
