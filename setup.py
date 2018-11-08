@@ -4,7 +4,7 @@ from setuptools import setup
 
 setup(
         name='hlk-sw16',
-        version='0.0.5',
+        version='0.0.6',
         description='Python client for HLK-SW16',
         url='https://github.com/jameshilliard/hlk-sw16',
         author='James Hilliard',

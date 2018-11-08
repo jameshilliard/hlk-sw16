@@ -19,10 +19,27 @@ class SW16Protocol(asyncio.Protocol):
         self.logger = logger
         self._buffer = b''
         self.disconnect_callback = disconnect_callback
+        self._timeout = None
+        self._cmd_timeout = None
 
     def connection_made(self, transport):
         """Initialize protocol transport."""
         self.transport = transport
+        self._reset_timeout()
+
+    def _reset_timeout(self):
+        """Reset timeout for date keep alive."""
+        if self._timeout:
+            self._timeout.cancel()
+        self._timeout = self.loop.call_later(self.client.timeout,
+                                             self.transport.close)
+
+    def reset_cmd_timeout(self):
+        """Reset timeout for command execution."""
+        if self._cmd_timeout:
+            self._cmd_timeout.cancel()
+        self._cmd_timeout = self.loop.call_later(self.client.timeout,
+                                                 self.transport.close)
 
     def data_received(self, data):
         """Add incoming data to buffer."""
@@ -58,6 +75,7 @@ class SW16Protocol(asyncio.Protocol):
     def _handle_raw_packet(self, raw_packet):
         """Parse incoming packet."""
         if raw_packet[1:2] == b'\x1f':
+            self._reset_timeout()
             year = raw_packet[2]
             month = raw_packet[3]
             day = raw_packet[4]
@@ -98,6 +116,10 @@ class SW16Protocol(asyncio.Protocol):
                     waiter.set_result(states)
                 if self.client.waiters:
                     self.send_packet()
+                else:
+                    self._cmd_timeout.cancel()
+            elif self._cmd_timeout:
+                self._cmd_timeout.cancel()
         else:
             self.logger.warning('received unknown packet: %s',
                                 binascii.hexlify(raw_packet))
@@ -109,6 +131,7 @@ class SW16Protocol(asyncio.Protocol):
         self.client.active_transaction = waiter
         self.client.in_transaction = True
         self.client.active_packet = packet
+        self.reset_cmd_timeout()
         self.transport.write(packet)
 
     @staticmethod
@@ -202,6 +225,7 @@ class SW16Client:
         if self.reconnect:
             self.logger.debug("Protocol disconnected...reconnecting")
             await self.setup()
+            self.protocol.reset_cmd_timeout()
             if self.in_transaction:
                 self.protocol.transport.write(self.active_packet)
             else:
@@ -245,9 +269,7 @@ class SW16Client:
     async def status(self, switch=None):
         """Get current relay status."""
         if switch is not None:
-            if self.states.get(switch, None) is not None:
-                state = self.states[switch]
-            elif self.waiters or self.in_transaction:
+            if self.waiters or self.in_transaction:
                 fut = self.loop.create_future()
                 self.status_waiters.append(fut)
                 states = await fut
@@ -257,9 +279,7 @@ class SW16Client:
                 states = await self._send(packet)
                 state = states[switch]
         else:
-            if self.states:
-                state = self.states
-            elif self.waiters or self.in_transaction:
+            if self.waiters or self.in_transaction:
                 fut = self.loop.create_future()
                 self.status_waiters.append(fut)
                 state = await fut
