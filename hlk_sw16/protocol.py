@@ -105,6 +105,7 @@ class SW16Protocol(asyncio.Protocol):
     def send_packet(self):
         """Write next packet in send queue."""
         waiter, packet = self.client.waiters.popleft()
+        self.logger.debug('sending packet: %s', binascii.hexlify(packet))
         self.client.active_transaction = waiter
         self.client.in_transaction = True
         self.client.active_packet = packet
@@ -125,7 +126,7 @@ class SW16Protocol(asyncio.Protocol):
         else:
             self.logger.info('disconnected because of close/abort.')
         if self.disconnect_callback:
-            self.disconnect_callback()
+            asyncio.ensure_future(self.disconnect_callback(), loop=self.loop)
 
 
 class SW16Client:
@@ -193,13 +194,19 @@ class SW16Client:
         if self.transport:
             self.transport.close()
 
-    def handle_disconnect_callback(self):
+    async def handle_disconnect_callback(self):
         """Reconnect automatically unless stopping."""
-        if self.reconnect:
-            self.logger.debug("Protocol disconnected...reconnecting")
-            asyncio.ensure_future(self.setup(), loop=self.loop)
+        self.is_connected = False
         if self.disconnect_callback:
             self.disconnect_callback()
+        if self.reconnect:
+            self.logger.debug("Protocol disconnected...reconnecting")
+            await self.setup()
+            if self.in_transaction:
+                self.protocol.transport.write(self.active_packet)
+            else:
+                packet = self.protocol.format_packet(b"\x1e")
+                self.protocol.transport.write(packet)
 
     def register_status_callback(self, callback, switch):
         """Register a callback which will fire when state changes."""
@@ -209,7 +216,6 @@ class SW16Client:
 
     def _send(self, packet):
         """Add packet to send queue."""
-        self.logger.debug('sending packet: %s', binascii.hexlify(packet))
         fut = self.loop.create_future()
         self.waiters.append((fut, packet))
         if self.waiters and self.in_transaction is False:
@@ -271,7 +277,8 @@ async def create_hlk_sw16_connection(port=None, host=None,
     """Create HLK-SW16 Client class."""
     client = SW16Client(host, port=port,
                         disconnect_callback=disconnect_callback,
-                        reconnect_callback=None, loop=loop, logger=logger,
+                        reconnect_callback=reconnect_callback,
+                        loop=loop, logger=logger,
                         timeout=timeout, reconnect_interval=reconnect_interval)
     await client.setup()
 
