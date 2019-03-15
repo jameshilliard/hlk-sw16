@@ -91,13 +91,13 @@ class SW16Protocol(asyncio.Protocol):
             states = {}
             changes = []
             for switch in range(0, 16):
-                if raw_packet[2+switch:3+switch] == b'\x02':
+                if raw_packet[2+switch:3+switch] == b'\x01':
                     states[format(switch, 'x')] = True
                     if (self.client.states.get(format(switch, 'x'), None)
                             is not True):
                         changes.append(format(switch, 'x'))
                         self.client.states[format(switch, 'x')] = True
-                elif raw_packet[2+switch:3+switch] == b'\x01':
+                elif raw_packet[2+switch:3+switch] == b'\x02':
                     states[format(switch, 'x')] = False
                     if (self.client.states.get(format(switch, 'x'), None)
                             is not False):
@@ -250,9 +250,9 @@ class SW16Client:
         """Turn on relay."""
         if switch is not None:
             switch = codecs.decode(switch.rjust(2, '0'), 'hex')
-            packet = self.protocol.format_packet(b"\x10" + switch + b"\x02")
+            packet = self.protocol.format_packet(b"\x10" + switch + b"\x01")
         else:
-            packet = self.protocol.format_packet(b"\x0b")
+            packet = self.protocol.format_packet(b"\x0a")
         states = await self._send(packet)
         return states
 
@@ -260,9 +260,9 @@ class SW16Client:
         """Turn off relay."""
         if switch is not None:
             switch = codecs.decode(switch.rjust(2, '0'), 'hex')
-            packet = self.protocol.format_packet(b"\x10" + switch + b"\x01")
+            packet = self.protocol.format_packet(b"\x10" + switch + b"\x02")
         else:
-            packet = self.protocol.format_packet(b"\x0a")
+            packet = self.protocol.format_packet(b"\x0b")
         states = await self._send(packet)
         return states
 
