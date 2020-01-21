@@ -21,11 +21,19 @@ class SW16Protocol(asyncio.Protocol):
         self.disconnect_callback = disconnect_callback
         self._timeout = None
         self._cmd_timeout = None
+        self._keep_alive = None
 
     def connection_made(self, transport):
         """Initialize protocol transport."""
         self.transport = transport
         self._reset_timeout()
+
+    def _send_keepalive_packet(self):
+        """Send a keep alive packet."""
+        if not self.client.in_transaction:
+            packet = self.format_packet(b"\x12")
+            self.logger.debug('sending keep alive packet')
+            self.transport.write(packet)
 
     def _reset_timeout(self):
         """Reset timeout for date keep alive."""
@@ -33,6 +41,11 @@ class SW16Protocol(asyncio.Protocol):
             self._timeout.cancel()
         self._timeout = self.loop.call_later(self.client.timeout,
                                              self.transport.close)
+        if self._keep_alive:
+            self._keep_alive.cancel()
+        self._keep_alive = self.loop.call_later(
+            self.client.keep_alive_interval,
+            self._send_keepalive_packet)
 
     def reset_cmd_timeout(self):
         """Reset timeout for command execution."""
@@ -87,7 +100,21 @@ class SW16Protocol(asyncio.Protocol):
                 'received date: Year: %s, Month: %s, Day: %s, Hour: %s, '
                 'Minute: %s, Sec: %s, Week %s',
                 year, month, day, hour, minute, sec, week)
+        elif raw_packet[1:2] == b'\x0e':
+            self._reset_timeout()
+            sec = raw_packet[2]
+            minute = raw_packet[3]
+            hour = raw_packet[4]
+            day = raw_packet[5]
+            month = raw_packet[6]
+            week = raw_packet[7]
+            year = raw_packet[8]
+            self.logger.debug(
+                'received date: Year: %s, Month: %s, Day: %s, Hour: %s, '
+                'Minute: %s, Sec: %s, Week %s',
+                year, month, day, hour, minute, sec, week)
         elif raw_packet[1:2] == b'\x0c':
+            self._reset_timeout()
             states = {}
             changes = []
             for switch in range(0, 16):
@@ -148,6 +175,8 @@ class SW16Protocol(asyncio.Protocol):
             self.logger.error('disconnected due to error')
         else:
             self.logger.info('disconnected because of close/abort.')
+        if self._keep_alive:
+            self._keep_alive.cancel()
         if self.disconnect_callback:
             asyncio.ensure_future(self.disconnect_callback(), loop=self.loop)
 
@@ -157,7 +186,8 @@ class SW16Client:
 
     def __init__(self, host, port=8080,
                  disconnect_callback=None, reconnect_callback=None,
-                 loop=None, logger=None, timeout=10, reconnect_interval=10):
+                 loop=None, logger=None, timeout=10, reconnect_interval=10,
+                 keep_alive_interval=3):
         """Initialize the HLK-SW16 client wrapper."""
         if loop:
             self.loop = loop
@@ -175,6 +205,7 @@ class SW16Client:
         self.reconnect = True
         self.timeout = timeout
         self.reconnect_interval = reconnect_interval
+        self.keep_alive_interval = keep_alive_interval
         self.disconnect_callback = disconnect_callback
         self.reconnect_callback = reconnect_callback
         self.waiters = deque()
@@ -293,13 +324,15 @@ async def create_hlk_sw16_connection(port=None, host=None,
                                      disconnect_callback=None,
                                      reconnect_callback=None, loop=None,
                                      logger=None, timeout=None,
-                                     reconnect_interval=None):
+                                     reconnect_interval=None,
+                                     keep_alive_interval=None):
     """Create HLK-SW16 Client class."""
     client = SW16Client(host, port=port,
                         disconnect_callback=disconnect_callback,
                         reconnect_callback=reconnect_callback,
                         loop=loop, logger=logger,
-                        timeout=timeout, reconnect_interval=reconnect_interval)
+                        timeout=timeout, reconnect_interval=reconnect_interval,
+                        keep_alive_interval=keep_alive_interval)
     await client.setup()
 
     return client
