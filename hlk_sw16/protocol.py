@@ -81,7 +81,7 @@ class SW16Protocol(asyncio.Protocol):
         checksum = 0
         for i in range(1, 17):
             checksum += raw_packet[i]
-        if checksum != raw_packet[18]:
+        if (checksum % 256) != raw_packet[18]:
             return False
         return True
 
